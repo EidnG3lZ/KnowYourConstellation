@@ -24,8 +24,11 @@ def package_release(root: Path, build: Path, report: dict) -> Path:
         files[destination] = data
     slug = report['slug']
     # Public names share one format; provenance keeps the internal build revision.
+    # A localization supplies its own manager-facing name and description, while
+    # the slug and release filename stay ASCII so the package keeps its identity.
     release_version = 'v' + str(report.get('version') or report['revision']).rsplit('v', 1)[-1]
-    display_name = report['name'] + ' - ' + release_version
+    display_name = report.get('localized_name') or (report['name'] + ' - ' + release_version)
+    description = report.get('localized_description') or report['description']
     release_stem = report['name'].replace(' ', '-') + '-' + release_version
     files[slug + '-README.txt'] = (root / report.get('install_instructions', 'INSTALL.txt')).read_bytes()
     thumbnail = root / 'assets/thumbnail.png'
@@ -39,13 +42,13 @@ def package_release(root: Path, build: Path, report: dict) -> Path:
         'runtime_verified': report.get('runtime_verified', False),
         'files': {name: digest(data) for name, data in files.items()},
     }
-    for key in ('requires', 'provides'):
+    for key in ('requires', 'provides', 'localization'):
         if key in report:
             provenance[key] = report[key]
     files[slug + '-manifest.json'] = (json.dumps(provenance, indent=2) + '\n').encode()
-    option = {'Name': display_name, 'Description': report['description'], 'Include': ['data']}
+    option = {'Name': display_name, 'Description': description, 'Include': ['data']}
     manager = {'Version': 1, 'Guid': report['guid'], 'Name': display_name,
-               'Description': report['description'], 'Options': [option]}
+               'Description': description, 'Options': [option]}
     if thumbnail.is_file():
         manager['IconPath'] = option['Image'] = 'thumbnail.png'
     files['manifest.json'] = (json.dumps(manager, indent=2) + '\n').encode()

@@ -13,6 +13,19 @@ Nested workspace projects may share their parent's releases directory.
 Run `python scripts/build.py --rows` to build the separate static rows variant.
 See [Static rows variant](docs/ROWS.md) for layout and verification details.
 
+Localized builds are supported end to end: Lua sources are read and written as
+UTF-8, so display tables such as `src/catalogue.lua` may carry any script the
+active locale's native body font covers. Keep display text free of ASCII
+semicolons and control codes. Translating display text changes the runtime hash,
+so build it with `--allow-untested` until an in-game check promotes the payload.
+The Simplified Chinese fork documents its text inventory, terminology, glyph
+availability and re-localization procedure in
+[the localization playbook](docs/LOCALIZATION-zh-CN.md).
+
+The shipped chunk is a non-GC64 (`-W`) dump for the game's loader. When
+HD2_LUAJIT is a GC64 build, the local package test loads an equivalent GC64 dump
+of the same wrapper instead; the packaged bytes are unaffected.
+
 Use synthetic fixtures in public tests. Do not commit memory captures,
 session packets, screenshots, local paths, extracted game files or logs.
 Keep publication-files.json synchronized with the intended public files.

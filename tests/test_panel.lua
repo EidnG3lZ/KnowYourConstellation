@@ -51,26 +51,59 @@ engine.Gui.update_rect=function(g,id,p,s,c)
     assert(rects[id] and p.x>=0 and p.y>=0 and s.x>0)
     rects[id]={p=p,s=s,c=c}
 end
+-- One byte is one glyph only for Latin scripts. A localized character spans
+-- several bytes but still about one glyph, so its advance is divided over its
+-- byte length; the caret model stays proportional and byte-addressable.
 local function span(t,size)
     local result=0
     local previous
     for c in t:gmatch('.') do
-        result=result+size*(c=='W' and .9 or c=='I' and .25 or c==' ' and .3 or .55)
+        result=result+size*(c=='W' and .9 or c=='I' and .25 or c==' ' and .3
+            or c:byte()>126 and 1/3 or .55)
         if previous=='E' and c=='N' then result=result-.06*size end
         previous=c
     end
     return result
 end
+-- The native text pipeline can only lay out whole UTF-8 sequences. A partial
+-- one locks the game up, so every measured or drawn string is checked here.
+local function complete(text)
+    local index=1
+    while index<=#text do
+        local byte=text:byte(index)
+        local size=byte<0x80 and 1 or byte<0xE0 and 2 or byte<0xF0 and 3 or 4
+        assert(index+size-1<=#text, 'Native text call received a partial sequence')
+        for offset=1,size-1 do
+            local follow=text:byte(index+offset)
+            assert(follow and follow>=0x80 and follow<=0xBF,
+                'Native text call received a partial sequence')
+        end
+        index=index+size
+    end
+    return text
+end
+-- Model the active face. It has no glyph for one catalogue character, and no
+-- glyph for a private-use code point either: the engine draws the notdef mark
+-- for both, which is the question mark players see. Ink bounds exclude trailing
+-- spaces and include side bearings, and are deliberately different from the
+-- caret, including zero advances.
+local function face(value)
+    value=value:gsub('蟑','?')
+    -- Only the private-use areas U+E000-U+EFFF and U+F000-U+F8FF are guaranteed
+    -- glyphless; full-width forms sit just above them and are real glyphs.
+    value=value:gsub('\238[\128-\191][\128-\191]','?')
+    return (value:gsub('\239[\128-\163][\128-\191]','?'))
+end
 engine.Gui.text_extents=function(g,t,f,s)
     metric_calls=metric_calls+1
     metric_characters=metric_characters+#t
+    complete(t)
     assert(f.hash=='b56d2abac5d17df2', 'Native font ID lost')
-    -- Ink bounds exclude trailing spaces and include side bearings. They
-    -- are deliberately different from the caret, including zero advances.
-    return {x=-.08*s},{x=span(t:gsub(' +$',''),s)+.04*s},{x=span(t,s)}
+    return {x=-.08*s},{x=span(face(t:gsub(' +$','')),s)+.04*s},{x=span(t,s)}
 end
 local function record(g,t,f,s,m,p,c)
-    model.ascii(t)
+    model.display(t)
+    complete(t)
     assert(g.material and g.material.atlas and g.material.range and g.material.shadow,
         'Native font material must be configured before drawing')
     for _,hash in ipairs({'8035c266','5e8455fe','309e7783','82b803a8'}) do
@@ -95,7 +128,9 @@ local function anchor()
     return {x=(width-math.min(width,height*16/9))/2+54*s,y=height-510*s,w=533*s,h=371*s,
         scale=s,font='b56d2abac5d17df2',material='9f85b87d3ff20cbb',atlas='d1ebb991c79f934b'}
 end
-local surface=panel.new(engine)
+-- The renderer traces its cold path so a frozen frame names its stage.
+local traces={}
+local surface=panel.new(engine,function(message) traces[#traces+1]=message end)
 for _,res in ipairs({{1280,720},{1920,1080},{2560,1440},{3440,1440},{5120,1440},{1280,1024}}) do
     width,height=unpack(res)
     local a=anchor()
@@ -149,7 +184,8 @@ width,height=3440,1440
 local a=anchor()
 local m=model.make({key='new',screen='briefing',difficulty=10,tags={1,11},complete=true,
     heavies={'Bile Titans'}},catalogue)
-assert(m.marquee:find('BILE BUGS') and m.marquee:find('DRAGONROACH ACTIVITY') and m.marquee:find('Bile Titans'))
+assert(m.marquee:find(catalogue[1][1],1,true) and m.marquee:find(catalogue[11][1],1,true)
+    and m.marquee:find('Bile Titans',1,true))
 surface:clear()
 surface:show(m,0,a)
 local before,first=created,texts[#texts]
@@ -165,7 +201,7 @@ surface:show(changed,0,a)
 assert(math.abs(surface.distance/surface.metrics.width-entry)<.000001,
     'Switching missions during entry restarted the marquee')
 for _=1,180 do surface:show(changed,1/60,a) end
-assert(texts[#texts].text:find('[HUNTER SWARMS]',1,true)==1,'Mission switch retained stale text')
+assert(texts[#texts].text:find('['..catalogue[3][1]..']',1,true)==1,'Mission switch retained stale text')
 surface:show(m,0,a)
 before=created
 for _=1,2400 do
@@ -180,10 +216,40 @@ local t2,x2=panel.window(surface.metrics,surface.metrics.period,300)
 assert(t1==t2 and x1==x2,'Marquee loop is discontinuous')
 assert(math.abs(surface.metrics.period-span(m.marquee..'      ',20*a.scale))<.001,
     'Marquee period must include trailing space advances')
-for i=1,#surface.metrics.text do
-    assert(math.abs(surface.metrics.edges[i+1]-span(surface.metrics.text:sub(1,i),20*a.scale))<.001,
-        'Cached repeated-cycle carets differ from full-prefix proportional font measurements')
+-- Carets are cached per byte but only whole-character prefixes are measured:
+-- every byte inside one character reports that character's closing caret, so
+-- the engine is never handed a partial sequence.
+local at=1
+while at<=#surface.metrics.text do
+    local byte=surface.metrics.text:byte(at)
+    local size=byte<0x80 and 1 or byte<0xE0 and 2 or byte<0xF0 and 3 or 4
+    local caret=span(surface.metrics.text:sub(1,at+size-1),20*a.scale)
+    for index=at,at+size-1 do
+        assert(math.abs(surface.metrics.edges[index+1]-caret)<.001,
+            'Cached carets differ from whole-character prefix measurements')
+    end
+    at=at+size
 end
+-- Localized marquees must never be cut inside a multi-byte character, or the
+-- native renderer receives malformed text at either clip edge.
+local function localized(text)
+    for index=1,#text do if text:byte(index)>126 then return true end end
+    return false
+end
+assert(localized(m.marquee),'The catalogue must ship localized text for this check')
+for _,distance in ipairs({-surface.metrics.width,-40,-1,0}) do
+    complete(panel.window(surface.metrics,distance,300))
+end
+for phase=0,60 do
+    complete(panel.window(surface.metrics,phase*surface.metrics.period/60,300))
+end
+assert(panel.window(surface.metrics,0,300):sub(1,1)=='[' and
+    panel.window(surface.metrics,surface.metrics.period,300):sub(1,1)=='[',
+    'A cycle-aligned window must open on the section marker')
+-- The renderer revalidates what it draws, so malformed text never reaches a
+-- native text call even if a caller bypasses the model.
+assert(not pcall(surface.show,surface,{key='bad',screen='map',label='label',footer='footer',
+    marquee='['..string.char(226,128)..'] broken'},0,a),'Malformed UTF-8 must be rejected before drawing')
 assert(surface.distance>0,'Test must reach the repeating portion of the marquee')
 local phase=(surface.distance%surface.metrics.period)/surface.metrics.period
 for _,next_model in ipairs({changed,m,changed,m}) do
@@ -214,14 +280,33 @@ surface:show(changed_footer,0,a)
 assert(created==before and metric_calls-warm_calls<=2,'Footer changes must not rebuild marquee metrics')
 surface:clear()
 assert(not surface.distance and not surface.gui)
+local traced=#traces
 surface:show(m,0,a)
 assert(texts[#texts].text=='' and surface.distance<0,'Reopening must enter from the right')
+local measured,drawn
+for index=traced+1,#traces do
+    if not measured and traces[index]:sub(1,15)=='panel measuring' then measured=index end
+    if not drawn and traces[index]:sub(1,13)=='panel drawing' then drawn=index end
+end
+assert(measured and drawn and measured<drawn,
+    'A cold frame must name the measurement stage before the drawing stage')
+-- The face cannot draw 蟑, so the report must say exactly that: this is the
+-- question-mark the localization saw, caught without another game launch.
+local reported
+for index=traced+1,#traces do
+    if traces[index]:sub(1,13)=='font missing ' then reported=traces[index] end
+end
+assert(reported=='font missing 1 蟑 font=b56d2abac5d17df2',
+    'Undrawable characters must be reported by their code point, got: '..tostring(reported))
 surface:clear()
 local cold_calls,cold_characters=metric_calls,metric_characters
 surface:show(m,0,a)
 assert(metric_calls-cold_calls<=#m.marquee+10,'Cold reports must only measure one cycle of prefixes')
 assert(metric_characters-cold_characters < (#m.marquee+10)^2,
     'Repeated copies must not multiply cold font measurement work')
+traced=#traces
+surface:show(m,0,a)
+assert(#traces==traced,'Warm frames must not trace, or logging would cost a write per frame')
 surface.distance=200
 local saved_metrics,saved_cache=surface.metrics,surface.cache
 local suspended_destroyed,suspended_created=destroyed,created

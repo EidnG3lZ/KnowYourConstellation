@@ -27,11 +27,23 @@ function source_object:sample()
     if sample_pending then return nil end
     return snapshot
 end
+-- Mirror the loader's log file: open_log truncates, so only the last write
+-- survives. draw_log captures what the file held at the instant of the native
+-- render call, which is exactly what a frame that hangs there would leave.
+local journal,last_log,draw_log = {},nil,nil
+local function logger()
+    return {write=function(_,text)
+        last_log=text
+        journal[#journal+1]='log:'..text:gsub('\n','|')
+    end, close=function() end}
+end
 local surface = {}
 function surface:show(m)
     draws=draws+1
     visible=m
     frame_visible=true
+    draw_log=last_log
+    journal[#journal+1]='draw'
     published[#published+1]=m
     return true
 end
@@ -41,7 +53,11 @@ function surface:suspend(anchor)
     suspends=suspends+1
     visible=nil
 end
-local env = setmetatable({stingray={Gui={},World={}},print=function() end,os={},io=io}, {__index=_G})
+local env = setmetatable({stingray={Gui={},World={}},print=function() end,os={},io=io,
+    CowboyBingusModLoader={open_log=function(name)
+        assert(name=='EnemyIntelligence.log','Logs must stay in the shared folder')
+        return logger()
+    end}}, {__index=_G})
 env._G = env
 env.update = function(dt,marker) previous_calls=previous_calls+1 return 1,nil,marker end
 local function api()
@@ -56,6 +72,15 @@ assert(a==1 and b==nil and c=='marker' and draws==0)
 screen='map'
 env.update(0.1,'marker')
 assert(draws==1)
+-- report() runs after the native calls, so a frame that hangs inside the
+-- renderer would otherwise leave no record of what it was drawing.
+assert(draw_log=='test\ndrawing map first marquee='..#visible.marquee..'B localized font=nil\n',
+    'The drawing intent must be the last log content when the renderer blocks')
+local draw_index
+for index,entry in ipairs(journal) do if entry=='draw' then draw_index=index break end end
+local prefix='log:test|drawing map first marquee='
+assert(draw_index and journal[draw_index-1]:sub(1,#prefix)==prefix,
+    'The intent must be written before the native render call')
 local hover_clears=clears
 key='second'
 env.update(0.1,'marker')
@@ -84,8 +109,8 @@ assert(draws==before and clears>=5 and previous_calls==8)
 -- The real model reproduces the reported one-section/two-section change.
 local preliminary={key='rapid',screen='map',tags={1},difficulty=10,faction=2,complete=false}
 preliminary.heavies=heavy.possible(preliminary,heavy_data)
-assert(not model.make(preliminary,catalogue).marquee:find('[HEAVY ENEMIES]',1,true))
-assert(model.make(preliminary,catalogue).footer:find('Base forecast',1,true))
+assert(not model.make(preliminary,catalogue).marquee:find('[重型敌人]',1,true))
+assert(model.make(preliminary,catalogue).footer:find('基础预测',1,true))
 screen,key,complete,matches='map','rapid',false,true
 env.update(.001)
 assert(not visible,'A pending snapshot must not publish its preliminary sections or footer')
@@ -97,8 +122,8 @@ env.update(.011)
 assert(samples==pending_samples+1 and not visible,'Pending data must retry after 100 ms without showing a base report')
 complete=true
 env.update(.101)
-assert(visible and visible.key=='rapid' and visible.marquee:find('[HEAVY ENEMIES]',1,true))
-assert(visible.footer=='Possible encounters. Spawns are not guaranteed.')
+assert(visible and visible.key=='rapid' and visible.marquee:find('[重型敌人]',1,true))
+assert(visible.footer=='可能遭遇的敌人，不保证实际出现。')
 local resolved_samples=samples
 for _=1,4 do env.update(.1) end
 assert(samples==resolved_samples,'Resolved reports must retain the slower refresh cadence')
@@ -128,13 +153,13 @@ env.update(.001)
 assert(not visible,'Matched identity alone cannot authorize an incomplete snapshot')
 complete=true
 env.update(.101)
-assert(visible and visible.marquee:find('[HEAVY ENEMIES]',1,true) and clears==rapid_clears)
+assert(visible and visible.marquee:find('[重型敌人]',1,true) and clears==rapid_clears)
 complete=false
 env.update(.501)
 assert(not visible,'An incomplete refresh must hide rather than replace the complete report')
 complete=true
 env.update(.101)
-assert(visible and visible.footer=='Possible encounters. Spawns are not guaranteed.')
+assert(visible and visible.footer=='可能遭遇的敌人，不保证实际出现。')
 
 -- Reject both an old sample and a newer sample taken during a selection change.
 key='before-read'
@@ -184,9 +209,9 @@ on_sample=nil
 -- Complete reports may legitimately have one section on low difficulties.
 screen,key,difficulty,complete='map','low-difficulty',2,true
 env.update(.001)
-assert(visible and visible.marquee:find('[BILE BUGS]',1,true)
-    and not visible.marquee:find('[HEAVY ENEMIES]',1,true))
-assert(visible.footer=='Composition traits. Units vary with difficulty.')
+assert(visible and visible.marquee:find('['..catalogue[1][1]..']',1,true)
+    and not visible.marquee:find('[重型敌人]',1,true))
+assert(visible.footer=='编组特征：兵种随难度变化。')
 
 -- Loading or expiring remote packets are normal pending states. They must
 -- clear the old report without destroying the frame or resetting its scroll.
@@ -261,7 +286,7 @@ env.update(.001)
 assert(not frame_visible,'Loadout must stay hidden')
 descriptor_pending=false
 for _,m in ipairs(published) do
-    assert(m.complete and not m.footer:find('Base forecast',1,true),
+    assert(m.complete and not m.footer:find('基础预测',1,true),
         'Only complete reports and their matching footer may be published')
 end
 assert(suspends>0 and env.EnemyIntelligence.failures==1,'Expected pending states must not become reader failures')

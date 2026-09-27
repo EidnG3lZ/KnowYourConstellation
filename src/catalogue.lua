@@ -1,7 +1,15 @@
--- Plain ASCII player-facing descriptions. These describe composition traits.
+-- UTF-8 player-facing descriptions. These describe composition traits.
 -- They are not an exhaustive roster or a promise of individual encounters.
+-- The pipeline and the native body font are localized; keep the ASCII
+-- semicolon out, because the forecast markup reserves it.
+--
+-- The shipped face has no glyph for 汁 (U+6C41): the game draws the notdef mark
+-- instead, which players see as a question mark. Bile therefore uses 吐酸, the
+-- same wording the heavy-enemy labels use. EnemyIntelligenceFont.log in the
+-- loader log folder lists any other character the face cannot draw, so a new
+-- word can be checked before it ships.
 return {
-    [1] = {'胆汁虫群', '胆汁喷涌虫、胆汁吐沫虫与吐酸武斗虫'},
+    [1] = {'吐酸虫群', '吐酸喷涌虫、吐酸吐沫虫与吐酸武斗虫'},
     [2] = {'重甲虫群', '虫窝护卫与强袭虫群'},
     [3] = {'追猎虫群', '追猎虫与猛扑虫'},
     [4] = {'飞行虫群', '暂无兵种情报'},

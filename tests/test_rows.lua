@@ -42,15 +42,48 @@ engine.Material.set_texture=function(m,key,value)
     assert(key.hash=='88bac99b00000000' and value.hash=='d1ebb991c79f934b')
     m.atlas=true
 end
+-- One byte is one glyph only for Latin scripts. A localized character spans
+-- several bytes but still about one glyph, so its advance is divided over its
+-- byte length; the caret model stays proportional and byte-addressable.
 local function span(text,size)
     local n=0
-    for c in text:gmatch('.') do n=n+size*(c=='W' and .9 or c=='I' and .25 or c==' ' and .3 or .55) end
+    for c in text:gmatch('.') do
+        n=n+size*(c=='W' and .9 or c=='I' and .25 or c==' ' and .3 or c:byte()>126 and 1/3 or .55)
+    end
     return n
+end
+-- The native text pipeline can only lay out whole UTF-8 sequences. A partial
+-- one locks the game up, so every measured or drawn string is checked here.
+local function complete(text)
+    local index=1
+    while index<=#text do
+        local byte=text:byte(index)
+        local size=byte<0x80 and 1 or byte<0xE0 and 2 or byte<0xF0 and 3 or 4
+        assert(index+size-1<=#text, 'Native text call received a partial sequence')
+        for offset=1,size-1 do
+            local follow=text:byte(index+offset)
+            assert(follow and follow>=0x80 and follow<=0xBF,
+                'Native text call received a partial sequence')
+        end
+        index=index+size
+    end
+    return text
+end
+-- Model the active face. It has no glyph for one catalogue character, and no
+-- glyph for a private-use code point either: the engine draws the notdef mark
+-- for both, which is the question mark players see.
+local function face(value)
+    value=value:gsub('蟑','?')
+    -- Only the private-use areas U+E000-U+EFFF and U+F000-U+F8FF are guaranteed
+    -- glyphless; full-width forms sit just above them and are real glyphs.
+    value=value:gsub('\238[\128-\191][\128-\191]','?')
+    return (value:gsub('\239[\128-\163][\128-\191]','?'))
 end
 engine.Gui.text_extents=function(g,text,font,size)
     measured=measured+1
+    complete(text)
     assert(font.hash=='b56d2abac5d17df2')
-    return {x=-.08*size},{x=span(text,size)+.04*size},{x=span(text,size)}
+    return {x=-.08*size},{x=span(face(text),size)+.04*size},{x=span(text,size)}
 end
 local function rectangle(pos,size,colour)
     assert(pos.x>=0 and pos.y>=0 and pos.x+size.x<=width+1 and pos.y+size.y<=height+1)
@@ -59,7 +92,8 @@ end
 engine.Gui.rect=function(g,p,s,c) rects[#rects+1]=rectangle(p,s,c) return #rects end
 engine.Gui.update_rect=function(g,id,p,s,c) rects[id]=rectangle(p,s,c) end
 local function text(g,value,font,size,material,pos,colour)
-    model.ascii(value)
+    model.display(value)
+    complete(value)
     assert(g.ink.atlas and g.ink.range and g.ink.shadow)
     for _,hash in ipairs({'8035c266','5e8455fe','309e7783','82b803a8'}) do assert(g.ink.scalars[hash..'00000000']==0) end
     assert(font.hash=='b56d2abac5d17df2' and material.hash=='9f85b87d3ff20cbb')
@@ -78,13 +112,20 @@ local function report(tags,key)
     return model.make({key=key or 'mission',screen='map',difficulty=10,complete=true,tags=tags,
         heavies={'Bile Titans','Dragonroaches','Gloom Bile Titans'}},catalogue)
 end
+-- Compare only the drawn characters. Localized rows wrap between whole
+-- characters with no space to restore, while Latin rows wrap at spaces that
+-- the rejoin would otherwise have to reproduce exactly.
+local function compact(value) return (value:gsub('%s+','')) end
 local function visible(surface)
     local parts={}
     for _,id in ipairs(surface.text_ids) do parts[#parts+1]=texts[id].value end
-    return table.concat(parts,' '):gsub('%s+',' '):gsub(' $','')
+    return compact(table.concat(parts))
 end
-local function expected(m) return table.concat(panel.rows(m.marquee),' '):gsub('%s+',' ') end
-local surface=panel.new(engine)
+local function expected(m) return compact(table.concat(panel.rows(m.marquee))) end
+-- The renderer reports what the face can draw; a frozen or missing glyph is
+-- otherwise invisible to every offline check.
+local traces={}
+local surface=panel.new(engine,function(message) traces[#traces+1]=message end)
 for _,res in ipairs({{1280,720},{1920,1080},{2560,1440},{3440,1440},{5120,1440},{1280,1024}}) do
     width,height=unpack(res)
     local a=anchor()
@@ -125,9 +166,25 @@ for _,res in ipairs({{1280,720},{1920,1080},{2560,1440},{3440,1440},{5120,1440},
     surface:clear()
     assert(not surface.gui and not surface:suspend(a),'Unhover or closed panels cannot retain or recreate chrome')
 end
+-- The face cannot draw 蟑, so the rows report must say exactly that: the
+-- question mark players see, caught without another game launch.
+local reported
+for _,message in ipairs(traces) do
+    if message:sub(1,13)=='font missing ' then reported=message end
+end
+assert(reported=='font missing 1 蟑 font=b56d2abac5d17df2',
+    'Undrawable characters must be reported by their code point, got: '..tostring(reported))
 assert(not pcall(panel.rows,'invalid report'))
+assert(not pcall(panel.rows,'[a] b'..string.char(226,128)..'    /// END REPORT ///'),
+    'Malformed UTF-8 must be rejected before rows are built')
 local wrapped=panel.wrap(string.rep('W',80),40,function(value) return #value*10 end)
 assert(table.concat(wrapped)==string.rep('W',80),'Long tokens must wrap without losing characters')
+-- Unspaced scripts break between whole characters, never inside one.
+local han='[胆汁虫群] 胆汁喷涌虫、胆汁吐沫虫与吐酸武斗虫'
+local broken=panel.wrap(han,60,function(value) return span(value,20) end)
+assert(#broken>1,'Localized text must wrap when it exceeds the column')
+assert(compact(table.concat(broken))==compact(han),'Character wrapping must not lose text')
+for _,line in ipairs(broken) do complete(line) end
 local a=anchor()
 surface:show(report({1}),0,a)
 overlay={}

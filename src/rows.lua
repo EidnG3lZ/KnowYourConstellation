@@ -1,13 +1,52 @@
 -- Alternate view of the existing report model. Mission rules stay shared.
 return function(base)
     local M = {}
-    local function ascii(text)
-        assert(type(text)=='string' and not text:find('[^\32-\126]') and not text:find(';',1,true),
-            'Unsupported display text')
+    -- Player-facing text is UTF-8 so a localization can ship as source text.
+    -- Keep rejecting the semicolon the forecast markup reserves and control
+    -- codes the native text pipeline cannot draw, plus malformed, overlong,
+    -- surrogate and out-of-range UTF-8.
+    local function display(text)
+        assert(type(text)=='string' and not text:find(';',1,true),
+            'Display text must be a string without semicolons')
+        local index,length=1,#text
+        while index<=length do
+            local byte=text:byte(index)
+            local size,code
+            if byte<0x80 then size,code=1,byte
+            elseif byte>=0xC2 and byte<=0xDF then size,code=2,byte-0xC0
+            elseif byte>=0xE0 and byte<=0xEF then size,code=3,byte-0xE0
+            elseif byte>=0xF0 and byte<=0xF4 then size,code=4,byte-0xF0
+            else size,code=0,0 end
+            assert(size>0 and index+size-1<=length, 'Display text must be valid UTF-8')
+            for offset=1,size-1 do
+                local follow=text:byte(index+offset)
+                assert(follow and follow>=0x80 and follow<=0xBF, 'Display text must be valid UTF-8')
+                code=code*64+follow-0x80
+            end
+            assert(not (size==1 and (byte<0x20 or byte==0x7F)) and not (code>=0x80 and code<=0x9F),
+                'Display text must not contain control codes')
+            assert(not (size==2 and code<0x80) and not (size==3 and code<0x800)
+                and not (size==4 and code<0x10000), 'Display text must not use overlong UTF-8')
+            assert(not (code>=0xD800 and code<=0xDFFF) and code<=0x10FFFF,
+                'Display text must be a Unicode code point')
+            index=index+size
+        end
         return text
     end
+    -- Index just past the UTF-8 character that opens at index. Splitting
+    -- localized text per byte would hand the renderer malformed strings.
+    local function step(text,index)
+        local byte=text:byte(index)
+        local size
+        if byte<0x80 then size=1
+        elseif byte<0xE0 then size=2
+        elseif byte<0xF0 then size=3
+        else size=4 end
+        if index+size-1>#text then size=1 end
+        return index+size
+    end
     function M.rows(marquee)
-        local text=assert(ascii(marquee):match('^(.*)    /// END REPORT ///$'), 'Invalid forecast report')
+        local text=assert(display(marquee):match('^(.*)    /// END REPORT ///$'), 'Invalid forecast report')
         assert(#text<=4096, 'Forecast exceeds row bounds')
         local rows,at={},1
         while true do
@@ -28,13 +67,20 @@ return function(base)
             if measure(next_line)<=width then line=next_line else
                 if line~='' then lines[#lines+1]=line end
                 line=measure(word)<=width and word or ''
-                for i=1,line=='' and #word or 0 do
-                    local candidate=line..word:sub(i,i)
-                    if measure(candidate)>width then
-                        assert(line~='', 'Forecast column too narrow')
-                        lines[#lines+1]=line
-                        line=word:sub(i,i)
-                    else line=candidate end
+                if line=='' then
+                    -- Words without spaces, such as unspaced scripts, are
+                    -- broken between characters rather than between bytes.
+                    local at=1
+                    while at<=#word do
+                        local next_at=step(word,at)
+                        local candidate=line..word:sub(at,next_at-1)
+                        if measure(candidate)>width then
+                            assert(line~='', 'Forecast column too narrow')
+                            lines[#lines+1]=line
+                            line=word:sub(at,next_at-1)
+                        else line=candidate end
+                        at=next_at
+                    end
                 end
             end
         end
@@ -54,7 +100,8 @@ return function(base)
         assert(x>=0 and x+box.w<=width and h<=top-12*s, 'Forecast rows exceed viewport')
         return {x=x,y=top-h,w=box.w,h=h,side=true}
     end
-    function M.new(engine)
+    function M.new(engine,trace)
+        trace=trace or function() end
         local self={cache={},order={},text_ids={},rect_ids={}}
         local App,World,Gui=engine.Application,engine.World,engine.Gui
         local function worlds() return assert(App.worlds(), 'UI worlds unavailable') end
@@ -75,6 +122,37 @@ return function(base)
         end
         local function colour(a,r,g,b) return engine.Color(a,r,g,b) end
         local function vector(x,y,z) return engine.Vector3(x,y,z or 0) end
+        -- The active face is the only source of glyphs, and a character it
+        -- cannot draw is replaced by the notdef mark, which is what the game
+        -- shows as a question mark. Private-use code points are never in a game
+        -- font, so their ink is the notdef ink: any character with that same
+        -- ink is undrawable. Each character is probed once and reported, so a
+        -- localization can see exactly which characters it may use.
+        local glyphs,missing={},{}
+        local function probe_glyphs(value,font,size)
+            local function ink(one)
+                local lo,hi=Gui.text_extents(self.gui,one,font,size)
+                assert(lo and hi, 'Font metrics unavailable')
+                return engine.Vector2.x(hi)-engine.Vector2.x(lo)
+            end
+            local notdef
+            local at=1
+            while at<=#value do
+                local next_at=step(value,at)
+                local one=value:sub(at,next_at-1)
+                if glyphs[one]==nil then
+                    if one:find('[^\32-\126]') then
+                        if not notdef then notdef=ink('\238\128\128') end
+                        glyphs[one]=math.abs(ink(one)-notdef)<.01
+                        if glyphs[one] then missing[#missing+1]=one end
+                    else
+                        glyphs[one]=false
+                    end
+                end
+                at=next_at
+            end
+            return missing
+        end
         local function fit(model,font,box,anchor,width,height)
             local key=table.concat({model.marquee,anchor.font,box.scale,box.w},'|')
             local choices=self.cache[key]
@@ -83,6 +161,8 @@ return function(base)
                 self.cache[key]=choices
                 self.order[#self.order+1]=key
                 if #self.order>8 then self.cache[table.remove(self.order,1)]=nil end
+                -- Cold path: wrapping measures localized text many times.
+                trace('rows fitting '..#model.marquee..'B font='..tostring(anchor.font))
             end
             if not choices.rows then choices.rows=M.rows(model.marquee) end
             local rows=choices.rows
@@ -154,9 +234,16 @@ return function(base)
             if model.marquee then self.content=fit(model,font,box,anchor,width,height) end
             local content=assert(self.content, 'No complete row report')
             local geometry=placement(width,height,anchor,box,content.h)
-            local label,footer=ascii(model.label),ascii(model.footer)
+            local label,footer=display(model.label),display(model.footer)
             local signature=table.concat({model.marquee or '',label,footer,geometry.x,geometry.y,box.w,content.h,content.size,box.scale},'|')
             if signature==self.draw_signature then return true end
+            trace('rows drawing '..#content.lines..' lines font='..tostring(anchor.font))
+            -- Never let a diagnostic break the frame: report what the face can
+            -- draw, and stay silent if the engine refuses the probe.
+            pcall(function()
+                local absent=probe_glyphs((model.marquee or '')..label..footer,font,content.size)
+                trace('font missing '..#absent..' '..table.concat(absent)..' font='..tostring(anchor.font))
+            end)
             local x,y,w,h,s,b,i,p=geometry.x,geometry.y,box.w,content.h,box.scale,box.border,box.inset,box.padding
             local function rect(index,rx,ry,rw,rh,z,ink)
                 local pos,size=vector(rx,ry,z),engine.Vector2(rw,rh)

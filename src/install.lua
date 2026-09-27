@@ -19,6 +19,28 @@ return function(create_api,mission,resolve,catalogue,model,panel,build,heavy,hea
             end
         end)
     end
+    -- The native renderer can block the frame, and report() only runs once the
+    -- frame is done, so a frozen frame would leave no record of what it was
+    -- drawing. Trace the intent first. open_log truncates, but this write
+    -- happens before the risky call, and only when the intent changes, so it
+    -- costs one file write per mission and survives a hang.
+    local traced
+    local function trace(message)
+        if traced == message then return end
+        traced = message
+        -- Glyph coverage answers "which characters can this face draw", so it
+        -- gets its own file: the status log is truncated by every status write
+        -- and would otherwise discard the one answer that must survive.
+        local name = message:sub(1,5)=='font ' and 'EnemyIntelligenceFont.log' or 'EnemyIntelligence.log'
+        pcall(function()
+            local logger=rawget(_G,'CowboyBingusModLoader')
+            local file=logger and logger.open_log and logger.open_log(name)
+            if file then
+                file:write(build.revision..'\n'..message..'\n')
+                file:close()
+            end
+        end)
+    end
     local function initialize()
         if started then return source ~= nil end
         started = true
@@ -29,7 +51,7 @@ return function(create_api,mission,resolve,catalogue,model,panel,build,heavy,hea
             assert(api.module_hash(exe) == build.exe_sha256, 'Unsupported executable')
             assert(stingray and stingray.Gui and stingray.World, 'Game GUI unavailable')
             source = mission.new(api,game,resolve)
-            surface = panel.new(stingray)
+            surface = panel.new(stingray,trace)
             view = presentation.new(api,game)
         end)
         if not ok then
@@ -126,6 +148,10 @@ return function(create_api,mission,resolve,catalogue,model,panel,build,heavy,hea
             report('waiting for mission data '..screen..' '..(selected_key or 'preview loading'))
             return
         end
+        -- Nothing here may fail the frame: this is the diagnostic of last resort.
+        local marquee=current.marquee or ''
+        trace('drawing '..tostring(screen)..' '..tostring(current.key)..' marquee='..#marquee..'B '
+            ..(marquee:find('[^\32-\126]') and 'localized' or 'ascii')..' font='..tostring(anchor.font))
         local drawn = surface:show(current,dt,anchor)
         report((drawn and 'visible ' or 'waiting for GUI ')..screen..' '..current.key..' composition rules resolved')
     end
