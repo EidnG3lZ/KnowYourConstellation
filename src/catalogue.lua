@@ -9,7 +9,7 @@
 -- loader log folder lists any other character the face cannot draw, so a new
 -- word can be checked before it ships.
 return {
-    [1] = {'吐酸虫群', '吐酸喷涌虫、吐酸吐沫虫与吐酸武斗虫'},
+    [1] = {'吐酸虫群', '吐酸喷涌虫、吐沫虫与吐酸武斗虫'},
     [2] = {'重甲虫群', '虫窝护卫与强袭虫群'},
     [3] = {'追猎虫群', '追猎虫与猛扑虫'},
     [4] = {'飞行虫群', '暂无兵种情报'},
